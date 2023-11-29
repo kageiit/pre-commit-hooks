@@ -3,6 +3,7 @@ import argparse
 import collections
 import re
 import sys
+import subprocess
 from datetime import datetime
 from typing import Any, Sequence
 
@@ -39,6 +40,10 @@ class LicenseUpdateError(Exception):
     def __init__(self, message):
         super().__init__(message)
         self.message = message
+
+
+class CalledProcessError(RuntimeError):
+    pass
 
 
 def main(argv=None):
@@ -95,6 +100,13 @@ def main(argv=None):
         action="store_true",
         help=(
             "Allow past years in headers. License comments are not updated if they contain past years."
+        ),
+    )
+    parser.add_argument(
+        "--newly-added-files-only",
+        action="store_true",
+        help=(
+            "Only add licenses files that are newly added to git compared to the merge base."
         ),
     )
     args = parser.parse_args(argv)
@@ -180,6 +192,27 @@ def get_license_info(args) -> LicenseInfo:
     return license_info
 
 
+def added_files() -> set[str]:
+    cmd = ('git', 'diff', '--staged', '--name-only', '--diff-filter=A')
+    return set(cmd_output(*cmd).splitlines())
+
+
+def cmd_output(*cmd: str, retcode: int | None = 0, **kwargs: Any) -> str:
+    kwargs.setdefault('stdout', subprocess.PIPE)
+    kwargs.setdefault('stderr', subprocess.PIPE)
+    proc = subprocess.Popen(cmd, **kwargs)
+    stdout, stderr = proc.communicate()
+    stdout = stdout.decode()
+    if retcode is not None and proc.returncode != retcode:
+        raise CalledProcessError(cmd, retcode, proc.returncode, stdout, stderr)
+    return stdout
+
+
+def filter_added_files(filenames: list[str]) -> list[str]:
+    """Filter and return files that are newly added to git compared to the merge base."""
+    return set(filenames).intersection(added_files())
+
+
 def process_files(args, changed_files, todo_files, license_info: LicenseInfo):
     """
     Processes all license files
@@ -191,7 +224,13 @@ def process_files(args, changed_files, todo_files, license_info: LicenseInfo):
     """
     license_update_failed = False
     after_regex = args.insert_license_after_regex
-    for src_filepath in args.filenames:
+    if args.newly_added_files_only:
+        print("processing newly added files only")
+        filenames = filter_added_files(args.filenames)
+        print(f"newly added files: {filenames}")
+    else:
+        filenames = args.filenames
+    for src_filepath in filenames:
         src_file_content, encoding = _read_file_content(src_filepath)
         if skip_license_insert_found(
             src_file_content=src_file_content,
